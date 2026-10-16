@@ -1,0 +1,605 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Pac-Man Haunt</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link href="https://fonts.googleapis.com/css2?family=Poppins&display=swap" rel="stylesheet">
+  <link rel="stylesheet" href="style.css">
+  <script src="/socket.io/socket.io.js"></script>
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/three.js/r128/three.min.js"></script>
+</head>
+<body>
+
+  <div id="bg3d"></div>
+
+  <!-- 1) NAME + CREATE / JOIN -->
+  <div class="screen active" id="screenName">
+    <div class="scene">
+      <div class="float">
+        <div class="rectangle">
+          <h1>Pac-Man Haunt</h1>
+          <div class="field">
+            <input type="text" id="nameInput" placeholder=" " maxlength="12">
+            <label for="nameInput">Enter your name</label>
+          </div>
+          <div class="buttons">
+            <button class="primary" id="createBtn">Create Room</button>
+            <button class="secondary" id="gotoJoinBtn">Join Room</button>
+          </div>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <!-- 2) ENTER ROOM CODE -->
+  <div class="screen" id="screenJoin">
+    <div class="scene">
+      <div class="float">
+        <div class="rectangle">
+          <h2>Join a room</h2>
+          <div class="field">
+            <input type="text" id="codeInput" placeholder=" " maxlength="4">
+            <label for="codeInput">Enter code</label>
+          </div>
+          <div class="buttons">
+            <button class="primary" id="joinBtn">Join Room</button>
+            <button class="secondary" id="backBtn">Back</button>
+          </div>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <!-- 3) WAITING ROOM -->
+  <div class="screen" id="screenLobby">
+    <div class="scene">
+      <div class="float">
+        <div class="rectangle">
+          <h2>Waiting Room</h2>
+          <div class="muted">Room code (share it with friends)</div>
+          <div class="code" id="roomCode">----</div>
+          <div class="muted" id="ownerInfo"></div>
+          <ul class="players" id="playerList"></ul>
+          <div class="buttons">
+            <button class="secondary" id="hunterBtn">Hunter</button>
+            <button class="secondary" id="runnerBtn">Runner</button>
+          </div>
+          <div class="buttons hidden" id="startWrap">
+            <button class="primary" id="startBtn">Start Game</button>
+          </div>
+          <div class="muted" id="lobbyNote"></div>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <!-- 4) GAME -->
+  <div class="screen" id="screenGame">
+    <div class="scene game-scene">
+    <div class="rectangle game-card">
+    <div id="hud">
+      <span id="livesText">Lives: 3</span>
+      <span id="dotsText">Dots: 0</span>
+    </div>
+    <canvas id="game" class="game-canvas"></canvas>
+    <div class="muted">
+      Arrow keys or WASD to move.
+      <span class="legend-runner">Green = runners</span> ·
+      <span class="legend-hunter">Red = hunter</span>
+    </div>
+    <div class="dpad" id="dpad">
+      <button class="dpad-btn" data-key="arrowup">▲</button>
+      <button class="dpad-btn" data-key="arrowleft">◀</button>
+      <button class="dpad-btn" data-key="arrowright">▶</button>
+      <button class="dpad-btn" data-key="arrowdown">▼</button>
+    </div>
+    </div>
+    </div>
+  </div>
+
+  <!-- 5) ENDING -->
+  <div class="screen" id="screenEnd">
+    <div class="scene">
+      <div class="float">
+        <div class="rectangle">
+          <h1 id="winnerText"></h1>
+          <div class="muted" id="reasonText"></div>
+          <div class="team-title" id="teamTitle"></div>
+          <div class="team-list" id="teamList"></div>
+          <div class="buttons" id="backLobbyWrap">
+            <button class="primary" id="backLobbyBtn">Back to Waiting Room</button>
+          </div>
+          <div class="muted hidden" id="endWaitText">Waiting for the room owner...</div>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <div id="popup"></div>
+
+  <script>
+    const socket = io();
+
+    // ---------- SETTINGS ----------
+    const TILE = 32;
+    const SCALE = 2;
+    const TEAM_COLORS = { Runner: '#4cff2a', Hunter: '#ff4d4d' };
+
+    // ---------- SPRITE (same shape for everyone, colored by team) ----------
+    const SPRITE = [
+      "................",
+      ".....OOOOOO.....",
+      "....OBBBBBBO....",
+      "...OBBBBBBBBO...",
+      "...OBBBBBBBBO...",
+      "..OBBWWBBWWBBO..",
+      "..OBBWKBBWKBBO..",
+      "..OBBBBBBBBBBO..",
+      "..OBBBBBBBBBBO..",
+      "..OBBBBBBBBBBO..",
+      "...OBBBBBBBBO...",
+      "...OBBBOOBBBO...",
+      "...OBBO..OBBO...",
+      "................",
+      "................",
+      "................"
+    ];
+    const PALETTE = { O: '#0b0f1a', W: '#ffffff', K: '#000000' };
+
+    // ---------- STATE ----------
+    const $ = id => document.getElementById(id);
+    const canvas = $('game');
+    const ctx = canvas.getContext('2d');
+    let map = null;
+    let roomInfo = null;
+    let gameState = null;
+    let myName = '';
+
+    // ---------- HELPERS ----------
+    function showScreen(id) {
+      document.querySelectorAll('.screen').forEach(s => s.classList.toggle('active', s.id === id));
+    }
+
+    function popup(text) {
+      const p = $('popup');
+      p.textContent = text;
+      p.style.display = 'block';
+      clearTimeout(popup.timer);
+      popup.timer = setTimeout(() => { p.style.display = 'none'; }, 3500);
+    }
+
+    function getName() {
+      const n = $('nameInput').value.trim();
+      if (!n) { popup('Please enter your name first.'); return null; }
+      myName = n;
+      return n;
+    }
+
+    // ---------- NAME + ROOM BUTTONS ----------
+    $('createBtn').onclick = () => {
+      const n = getName();
+      if (n) socket.emit('createRoom', { name: n });
+    };
+    $('gotoJoinBtn').onclick = () => {
+      if (getName()) showScreen('screenJoin');
+    };
+    $('backBtn').onclick = () => showScreen('screenName');
+    $('joinBtn').onclick = () => {
+      const code = $('codeInput').value.trim().toUpperCase();
+      if (!code) return popup('Please enter the room code.');
+      socket.emit('joinRoom', { name: myName, code });
+    };
+
+    // ---------- WAITING ROOM BUTTONS ----------
+    $('hunterBtn').onclick = () => socket.emit('setRole', { role: 'Hunter' });
+    $('runnerBtn').onclick = () => socket.emit('setRole', { role: 'Runner' });
+    $('startBtn').onclick = () => socket.emit('startGame');
+    $('backLobbyBtn').onclick = () => socket.emit('backToLobby');
+
+    // ---------- SERVER EVENTS ----------
+    socket.on('errorMsg', msg => popup(msg));
+
+    socket.on('joined', ({ code, map: m }) => {
+      map = m;
+      $('roomCode').textContent = code;
+      showScreen('screenLobby');
+    });
+
+    socket.on('lobbyUpdate', room => {
+      roomInfo = room;
+      if (room.state === 'lobby') {
+        renderLobby();
+        showScreen('screenLobby');
+      }
+    });
+
+    socket.on('gameStarted', () => {
+      canvas.width = map[0].length * TILE;
+      canvas.height = map.length * TILE;
+      showScreen('screenGame');
+    });
+
+    const CATCH_WORDS = ['Ouch!', 'Wasted!', 'Ohh no!'];
+    const FLOAT_MS = 1000;
+    let floaters = [];   // pop-up messages currently on screen
+
+    socket.on('state', s => {
+      // A runner that was alive last update and is dead now was just caught
+      if (gameState) {
+        for (const p of s.players) {
+          const before = gameState.players.find(q => q.id === p.id);
+          if (before && before.role === 'Runner' && before.alive && !p.alive) {
+            floaters.push({
+              text: CATCH_WORDS[Math.floor(Math.random() * CATCH_WORDS.length)],
+              x: before.x,
+              y: before.y,
+              born: Date.now()
+            });
+          }
+        }
+      }
+      gameState = s;
+      $('livesText').textContent = `Lives: ${s.lives}`;
+      $('dotsText').textContent = `Dots: ${s.dots.length}`;
+    });
+
+    socket.on('gameOver', ({ title, reason, winnerRole, names }) => {
+      $('winnerText').textContent = title;
+      $('reasonText').textContent = reason;
+      $('teamTitle').textContent = winnerRole + ' team';
+
+      const box = $('teamList');
+      box.innerHTML = '';
+      for (const name of names) {
+        const chip = document.createElement('span');
+        chip.className = 'team-chip ' + (winnerRole === 'Hunter' ? 'chip-hunter' : 'chip-runner');
+        chip.textContent = name;
+        box.appendChild(chip);
+      }
+      const isOwner = roomInfo && roomInfo.owner === socket.id;
+      $('backLobbyWrap').classList.toggle('hidden', !isOwner);
+      $('endWaitText').classList.toggle('hidden', !!isOwner);
+      showScreen('screenEnd');
+    });
+
+    // ---------- WAITING ROOM RENDER ----------
+    function renderLobby() {
+      if (!roomInfo) return;
+      const me = roomInfo.players.find(p => p.id === socket.id);
+      const myRole = me ? me.role : 'Runner';
+      const isOwner = roomInfo.owner === socket.id;
+
+      $('roomCode').textContent = roomInfo.code;
+      $('ownerInfo').textContent = isOwner
+        ? 'You are the room owner. Start when everyone is ready.'
+        : 'Waiting for the room owner to start the game.';
+      $('startWrap').classList.toggle('hidden', !isOwner);
+
+      $('hunterBtn').className = myRole === 'Hunter' ? 'primary' : 'secondary';
+      $('runnerBtn').className = myRole === 'Runner' ? 'primary' : 'secondary';
+
+      const list = $('playerList');
+      list.innerHTML = '';
+      for (const p of roomInfo.players) {
+        const li = document.createElement('li');
+        const nameSpan = document.createElement('span');
+        nameSpan.textContent = p.name
+          + (p.id === socket.id ? ' (you)' : '')
+          + (p.id === roomInfo.owner ? ' 👑' : '');
+        const roleSpan = document.createElement('span');
+        roleSpan.textContent = p.role;
+        roleSpan.style.color = TEAM_COLORS[p.role];
+        roleSpan.style.fontWeight = 'bold';
+        li.append(nameSpan, roleSpan);
+        list.appendChild(li);
+      }
+      $('lobbyNote').textContent = `${roomInfo.players.length} player(s) in the room`;
+    }
+
+    // ---------- KEYBOARD (sends direction only when it changes) ----------
+    const KEYMAP = {
+      arrowup: [0, -1], w: [0, -1],
+      arrowdown: [0, 1], s: [0, 1],
+      arrowleft: [-1, 0], a: [-1, 0],
+      arrowright: [1, 0], d: [1, 0]
+    };
+    const keys = {};
+    let lastDir = '0,0';
+
+    let heldOrder = [];   // keys currently held, in the order they were pressed
+
+    function sendDirection() {
+      const k = heldOrder[heldOrder.length - 1];
+      const [dx, dy] = k ? KEYMAP[k] : [0, 0];
+      const dir = dx + ',' + dy;
+      if (dir !== lastDir) {
+        lastDir = dir;
+        socket.emit('move', { dx, dy });
+      }
+    }
+
+    window.addEventListener('keydown', e => {
+      if (e.target.tagName === 'INPUT') return;   // lets people type their name
+      const k = e.key.toLowerCase();
+      if (KEYMAP[k]) {
+        keys[k] = true;
+        if (!heldOrder.includes(k)) heldOrder.push(k);
+        sendDirection();
+        e.preventDefault();
+      }
+    });
+    window.addEventListener('keyup', e => {
+      const k = e.key.toLowerCase();
+      if (KEYMAP[k]) {
+        keys[k] = false;
+        heldOrder = heldOrder.filter(x => x !== k);
+        sendDirection();
+      }
+    });
+    window.addEventListener('blur', () => {
+      for (const k in keys) keys[k] = false;
+      heldOrder = [];
+      sendDirection();
+    });
+
+    // ---------- ON-SCREEN ARROW PAD (touch screens) ----------
+    document.querySelectorAll('.dpad-btn').forEach(btn => {
+      const k = btn.dataset.key;
+      const press = e => {
+        e.preventDefault();
+        keys[k] = true;
+        if (!heldOrder.includes(k)) heldOrder.push(k);
+        sendDirection();
+      };
+      const release = e => {
+        e.preventDefault();
+        keys[k] = false;
+        heldOrder = heldOrder.filter(x => x !== k);
+        sendDirection();
+      };
+      btn.addEventListener('pointerdown', press);
+      btn.addEventListener('pointerup', release);
+      btn.addEventListener('pointerleave', release);
+      btn.addEventListener('pointercancel', release);
+    });
+
+    // ---------- 3D TILT (same effect as your card) ----------
+    document.querySelectorAll('.scene').forEach(scene => {
+      const card = scene.querySelector('.rectangle');
+      if (!card) return;
+      function tilt(e) {
+        const r = card.getBoundingClientRect();
+        const x = (e.clientX - (r.left + r.width / 2)) / window.innerWidth;
+        const y = (e.clientY - (r.top + r.height / 2)) / window.innerHeight;
+        card.style.setProperty('--ry', (x * 30) + 'deg');
+        card.style.setProperty('--rx', (-y * 30) + 'deg');
+      }
+      function reset() {
+        card.style.setProperty('--ry', '0deg');
+        card.style.setProperty('--rx', '0deg');
+      }
+      scene.addEventListener('pointermove', tilt);
+      scene.addEventListener('pointerdown', tilt);
+      scene.addEventListener('pointerup', reset);
+      scene.addEventListener('pointercancel', reset);
+      scene.addEventListener('pointerleave', reset);
+    });
+
+    // ---------- DRAWING ----------
+    function drawSprite(x, y, color) {
+      for (let row = 0; row < SPRITE.length; row++) {
+        for (let col = 0; col < SPRITE[row].length; col++) {
+          const ch = SPRITE[row][col];
+          if (ch === '.') continue;
+          ctx.fillStyle = ch === 'B' ? color : PALETTE[ch];
+          ctx.fillRect(x + col * SCALE, y + row * SCALE, SCALE, SCALE);
+        }
+      }
+    }
+
+    function drawName(text, x, y) {
+      ctx.font = 'bold 13px sans-serif';
+      ctx.textAlign = 'center';
+      ctx.lineWidth = 3;
+      ctx.strokeStyle = 'black';
+      ctx.strokeText(text, x + TILE / 2, y - 6);
+      ctx.fillStyle = 'white';
+      ctx.fillText(text, x + TILE / 2, y - 6);
+    }
+
+    function drawGame() {
+      requestAnimationFrame(drawGame);
+      if (!map || !gameState) return;
+
+      ctx.clearRect(0, 0, canvas.width, canvas.height);
+
+      // Walls
+      for (let r = 0; r < map.length; r++) {
+        for (let c = 0; c < map[r].length; c++) {
+          if (map[r][c] === '#') {
+            const x = c * TILE, y = r * TILE;
+            ctx.fillStyle = '#243a8f';
+            ctx.fillRect(x, y, TILE, TILE);
+            ctx.strokeStyle = '#4f6fd6';
+            ctx.lineWidth = 2;
+            ctx.strokeRect(x + 2, y + 2, TILE - 4, TILE - 4);
+          }
+        }
+      }
+
+      // Dots (sent by the server)
+      ctx.fillStyle = '#ffe9a8';
+      for (const [c, r] of gameState.dots) {
+        ctx.beginPath();
+        ctx.arc(c * TILE + TILE / 2, r * TILE + TILE / 2, 3, 0, Math.PI * 2);
+        ctx.fill();
+      }
+
+      // Players (caught runners are hidden until they respawn)
+      for (const p of gameState.players) {
+        if (!p.alive) continue;
+        drawSprite(p.x, p.y, TEAM_COLORS[p.role]);
+        const label = p.id === socket.id ? p.name + ' (you)' : p.name;
+        drawName(label, p.x, p.y);
+
+        if (p.shieldMs > 0) {
+          // Blinking blue outline while protected
+          if (Math.floor(Date.now() / 150) % 2 === 0) {
+            ctx.strokeStyle = '#5ec8ff';
+            ctx.lineWidth = 2;
+            ctx.strokeRect(p.x + 2, p.y + 2, TILE - 4, TILE - 4);
+          }
+          // Countdown under the sprite
+          ctx.font = 'bold 11px sans-serif';
+          ctx.textAlign = 'center';
+          ctx.fillStyle = '#5ec8ff';
+          ctx.fillText(`SHIELD ${Math.ceil(p.shieldMs / 1000)}s`, p.x + TILE / 2, p.y + TILE + 12);
+        }
+      }
+
+      // Catch pop-ups: rise and fade out
+      const now = Date.now();
+      floaters = floaters.filter(f => now - f.born < FLOAT_MS);
+      for (const f of floaters) {
+        const t = (now - f.born) / FLOAT_MS;
+        ctx.globalAlpha = 1 - t;
+        ctx.font = 'bold 14px sans-serif';
+        ctx.textAlign = 'center';
+        ctx.lineWidth = 3;
+        ctx.strokeStyle = 'black';
+        const tx = f.x + TILE / 2;
+        const ty = f.y - 14 - t * 20;
+        ctx.strokeText(f.text, tx, ty);
+        ctx.fillStyle = '#ff4d4d';
+        ctx.fillText(f.text, tx, ty);
+        ctx.globalAlpha = 1;
+      }
+    }
+    drawGame();
+
+    // ---------- 3D BACKGROUND (NEBULA style) ----------
+    // Shapes fly past as you scroll. Shown on menu screens only, hidden during the game.
+    let bgScroll = 0;
+    let bgScrollTarget = 0;
+    const bgContainer = $('bg3d');
+
+    const bgScene = new THREE.Scene();
+    bgScene.fog = new THREE.FogExp2(0x1a2332, 0.008);
+
+    const bgCam = new THREE.PerspectiveCamera(50, window.innerWidth / window.innerHeight, 0.1, 1000);
+    bgCam.position.set(0, 0, 60);
+
+    const bgRenderer = new THREE.WebGLRenderer({ antialias: true, alpha: true });
+    bgRenderer.setPixelRatio(Math.min(window.devicePixelRatio, 2));
+    bgRenderer.setSize(window.innerWidth, window.innerHeight);
+    bgContainer.appendChild(bgRenderer.domElement);
+
+    const BG_COUNT = 400;   // shapes per copy; kept low so the PC stays fast
+    const BG_LEN = 260;     // depth of one copy of the field
+    // Colors taken from the game: page blue, card blue, and the green accent
+    const BG_COLORS = [0x2a3a55, 0x243247, 0x3a4f70, 0x4cff2a, 0xffffff];
+
+    const bgGroup = new THREE.Group();
+    bgScene.add(bgGroup);
+
+    const bgGeo = new THREE.IcosahedronGeometry(1, 0);
+    const bgMat = new THREE.MeshBasicMaterial({ wireframe: true, transparent: true, opacity: 0.7 });
+
+    // Every particle uses one dark grey
+    function pickColor() {
+      return 0x3d4a5c;
+    }
+
+    // One random layout, copied 3 times along the depth so the field never runs out
+    const layout = [];
+    for (let i = 0; i < BG_COUNT; i++) {
+      layout.push({
+        x: (Math.random() - 0.5) * 140,
+        y: (Math.random() - 0.5) * 80,
+        z: (Math.random() - 0.5) * BG_LEN,
+        rx: Math.random() * Math.PI,
+        ry: Math.random() * Math.PI,
+        s: 0.3 + Math.random() * 1.2,
+        spx: (Math.random() - 0.5) * 0.8,   // spin speed on X
+        spy: (Math.random() - 0.5) * 0.8,   // spin speed on Y
+        bob: 0.3 + Math.random() * 0.6,     // bobbing speed
+        ph: Math.random() * Math.PI * 2,    // bobbing start point
+        c: pickColor()
+      });
+    }
+
+    const bgDummy = new THREE.Object3D();
+    const bgColor = new THREE.Color();
+    const bgMeshes = [];
+    for (let k = -2; k <= 0; k++) {
+      const mesh = new THREE.InstancedMesh(bgGeo, bgMat, BG_COUNT);
+      mesh.userData.k = k;
+      for (let i = 0; i < BG_COUNT; i++) {
+        const L = layout[i];
+        bgDummy.position.set(L.x, L.y, L.z + k * BG_LEN);
+        bgDummy.rotation.set(L.rx, L.ry, 0);
+        bgDummy.scale.setScalar(L.s);
+        bgDummy.updateMatrix();
+        mesh.setMatrixAt(i, bgDummy.matrix);
+        mesh.setColorAt(i, bgColor.setHex(L.c));
+      }
+      mesh.instanceMatrix.needsUpdate = true;
+      mesh.instanceColor.needsUpdate = true;
+      bgGroup.add(mesh);
+      bgMeshes.push(mesh);
+    }
+
+    // Mouse wheel moves the camera forward/back through the shapes
+    window.addEventListener('wheel', e => {
+      bgScrollTarget += e.deltaY * 0.0008;
+    }, { passive: true });
+
+    // Touch drag does the same on phones
+    let touchY = null;
+    window.addEventListener('touchstart', e => { touchY = e.touches[0].clientY; }, { passive: true });
+    window.addEventListener('touchmove', e => {
+      if (touchY === null) return;
+      const y = e.touches[0].clientY;
+      bgScrollTarget += (touchY - y) * 0.002;
+      touchY = y;
+    }, { passive: true });
+
+    function bgLoop() {
+      requestAnimationFrame(bgLoop);
+
+      bgScroll += (bgScrollTarget - bgScroll) * 0.08;   // smooth movement
+      // Shift the field forward; wrap it so it repeats forever
+      const shift = bgScroll * 90;
+      bgGroup.position.z = ((shift % BG_LEN) + BG_LEN) % BG_LEN;
+
+      // Every shape spins and bobs on its own
+      const t = performance.now() / 1000;
+      for (const mesh of bgMeshes) {
+        for (let i = 0; i < BG_COUNT; i++) {
+          const L = layout[i];
+          bgDummy.position.set(
+            L.x,
+            L.y + Math.sin(t * L.bob + L.ph) * 1.5,
+            L.z + mesh.userData.k * BG_LEN
+          );
+          bgDummy.rotation.set(L.rx + t * L.spx, L.ry + t * L.spy, 0);
+          bgDummy.scale.setScalar(L.s);
+          bgDummy.updateMatrix();
+          mesh.setMatrixAt(i, bgDummy.matrix);
+        }
+        mesh.instanceMatrix.needsUpdate = true;
+      }
+      bgRenderer.render(bgScene, bgCam);
+    }
+    bgLoop();
+
+    window.addEventListener('resize', () => {
+      bgCam.aspect = window.innerWidth / window.innerHeight;
+      bgCam.updateProjectionMatrix();
+      bgRenderer.setSize(window.innerWidth, window.innerHeight);
+    });
+  </script>
+</body>
+</html>
